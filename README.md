@@ -39,61 +39,73 @@ Shared types live in `internal/model`, configuration in `internal/config`.
 
 A production system (like OLake) performs a **full-load snapshot** of the table first, then switches to **streaming from the replication slot**. This project focuses on the CDC streaming phase only, but the handoff point is well understood: you'd snapshot using a normal `SELECT *` inside a transaction whose snapshot is exported, note the LSN, then start consuming the slot from that LSN onwards.
 
-## Quick Start
+## Usage
 
 ### Prerequisites
 
 - [Go 1.21+](https://go.dev/dl/)
-- [Docker](https://docs.docker.com/get-docker/) & Docker Compose
+- A Postgres database (15+) with `wal_level=logical`
+- A publication and replication slot already created on the target table
 - (Optional) [DuckDB](https://duckdb.org/) or `parquet-tools` to inspect output files
 
-### 1. Start Postgres
+### Prepare your Postgres
+
+Your database must have logical replication enabled. If you control the server, set this in `postgresql.conf`:
+
+```
+wal_level = logical
+```
+
+Then create a publication and slot for the table(s) you want to capture:
+
+```sql
+CREATE PUBLICATION my_pub FOR TABLE your_table;
+SELECT pg_create_logical_replication_slot('my_slot', 'pgoutput');
+```
+
+### Run
+
+```bash
+PG_CONN="postgres://user:pass@host:5432/mydb?replication=database" \
+PG_PUBLICATION="my_pub" \
+PG_SLOT="my_slot" \
+  go run ./cmd/pg2parquet
+```
+
+The engine connects, starts consuming the WAL stream, and writes batched Parquet files to `./output/`.
+
+### Inspect the output
+
+```bash
+duckdb -c "SELECT * FROM read_parquet('./output/*.parquet');"
+```
+
+## Local Development
+
+For development and testing, a Docker Compose setup is included that spins up a pre-configured Postgres:
 
 ```bash
 docker compose up -d
 ```
 
-This launches Postgres 16 with `wal_level=logical` and automatically creates:
-- A `users` table
-- A publication `my_pub`
-- A replication slot `my_slot` (using the `pgoutput` plugin)
-
-Verify the slot exists:
+This launches Postgres 16 with `wal_level=logical` and runs [test/init.sql](file:///c:/Users/sanch/Documents/GitHub/pg2parquet/test/init.sql) to create a `users` table, publication, and replication slot.
 
 ```bash
+# verify the slot exists
 docker exec cdc-pg psql -U postgres -d cdc_demo \
   -c "SELECT slot_name, plugin FROM pg_replication_slots;"
-```
 
-### 2. Run the CDC engine
-
-```bash
+# run the engine (defaults point to the docker Postgres)
 go run ./cmd/pg2parquet
-```
 
-The engine connects to Postgres, starts consuming the WAL stream, and writes batched Parquet files to `./output/`.
-
-### 3. Generate some changes
-
-In another terminal:
-
-```bash
+# in another terminal, generate some changes
 docker exec -it cdc-pg psql -U postgres -d cdc_demo
 ```
 
 ```sql
 INSERT INTO users (name, email) VALUES ('alice', 'alice@example.com');
-INSERT INTO users (name, email) VALUES ('bob', 'bob@example.com');
-UPDATE users SET email = 'alice@newdomain.com' WHERE name = 'alice';
-DELETE FROM users WHERE name = 'bob';
-```
-
-You should see the engine log each decoded event in real time.
-
-### 4. Inspect the Parquet output
-
-```bash
-duckdb -c "SELECT * FROM read_parquet('./output/*.parquet');"
+UPDATE users SET email = 'alice@new.com' WHERE name = 'alice';
+DELETE FROM users WHERE name = 'alice';
 ```
 
 ## Configuration
@@ -125,9 +137,9 @@ pg2parquet/
 │   │   └── event.go             # ChangeEvent struct
 │   └── writer/
 │       └── parquet.go           # batched Parquet file writer
-├── scripts/
-│   └── init.sql                 # auto-run DB bootstrap
-├── docker-compose.yml
+├── test/
+│   └── init.sql                 # dev DB bootstrap (used by docker-compose)
+├── docker-compose.yml           # local dev only
 ├── ROADMAP.md                   # phased build plan
 └── README.md
 ```
