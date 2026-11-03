@@ -2,22 +2,24 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/supersanchayrx/pg2parquet/internal/config"
+	"github.com/supersanchayrx/pg2parquet/internal/replication"
 )
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// TODO (Phase 1): Parse connection string from env/flag
-	// TODO (Phase 1): Open replication connection
-	// TODO (Phase 1): Start replication and consume WAL stream
-	// TODO (Phase 3): Wire up the channel + writer goroutine
+	cfg := config.FromEnv()
 
-	fmt.Println("pg2parquet starting...")
-	<-ctx.Done()
-	fmt.Println("shutting down...")
+	err := replication.Run(ctx, cfg.ConnString, cfg.SlotName, cfg.Publication)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println("shut down cleanly")
 }
