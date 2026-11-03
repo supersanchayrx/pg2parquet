@@ -4,21 +4,34 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/supersanchayrx/pg2parquet/internal/decode"
+	"github.com/supersanchayrx/pg2parquet/internal/model"
 )
 
-func Run(ctx context.Context, connString string, slot string, publication string) error {
+const statusInterval = 10 * time.Second
+
+type Reader struct {
+	conn     *pgconn.PgConn
+	received pglogrepl.LSN
+	durable  atomic.Uint64
+}
+
+func Connect(ctx context.Context, connString string) (*Reader, error) {
 	conn, err := pgconn.Connect(ctx, connString)
 	if err != nil {
-		return fmt.Errorf("reader: connect: %w", err)
+		return nil, fmt.Errorf("reader: connect: %w", err)
 	}
-	defer conn.Close(context.Background())
+	return &Reader{conn: conn}, nil
+}
 
-	sys, err := pglogrepl.IdentifySystem(ctx, conn)
+func (r *Reader) Start(ctx context.Context, slot string, publication string, startLSN uint64) error {
+	sys, err := pglogrepl.IdentifySystem(ctx, r.conn)
 	if err != nil {
 		return fmt.Errorf("reader: identify system: %w", err)
 	}
@@ -28,33 +41,37 @@ func Run(ctx context.Context, connString string, slot string, publication string
 		"proto_version '1'",
 		"publication_names '" + publication + "'",
 	}
-	err = pglogrepl.StartReplication(ctx, conn, slot, 0, pglogrepl.StartReplicationOptions{PluginArgs: pluginArgs})
+	err = pglogrepl.StartReplication(ctx, r.conn, slot, pglogrepl.LSN(startLSN), pglogrepl.StartReplicationOptions{PluginArgs: pluginArgs})
 	if err != nil {
 		return fmt.Errorf("reader: start replication: %w", err)
 	}
-	log.Printf("started replication on slot %s", slot)
+	log.Printf("started replication on slot %s from %s", slot, pglogrepl.LSN(startLSN))
+	return nil
+}
 
-	var received pglogrepl.LSN
-	var flushed pglogrepl.LSN
-	statusInterval := 10 * time.Second
+func (r *Reader) MarkDurable(lsn uint64) {
+	r.durable.Store(lsn)
+}
+
+func (r *Reader) Run(ctx context.Context, decoder *decode.Decoder, out chan<- model.Txn) error {
+	defer close(out)
+
 	nextStatus := time.Now().Add(statusInterval)
 
 	for {
 		if time.Now().After(nextStatus) {
-			err = sendStatus(conn, received, flushed)
-			if err != nil {
+			if err := r.sendStatus(); err != nil {
 				return err
 			}
 			nextStatus = time.Now().Add(statusInterval)
 		}
 
 		recvCtx, cancel := context.WithDeadline(ctx, nextStatus)
-		msg, err := conn.ReceiveMessage(recvCtx)
+		msg, err := r.conn.ReceiveMessage(recvCtx)
 		cancel()
 
 		if ctx.Err() != nil {
-			log.Println("stopping reader")
-			return sendStatus(conn, received, flushed)
+			return nil
 		}
 		if err != nil {
 			if pgconn.Timeout(err) {
@@ -88,26 +105,66 @@ func Run(ctx context.Context, connString string, slot string, publication string
 			if err != nil {
 				return fmt.Errorf("reader: parse xlogdata: %w", err)
 			}
-			log.Printf("xlogdata: start=%s end=%s len=%d type=%c", xld.WALStart, xld.ServerWALEnd, len(xld.WALData), xld.WALData[0])
 
 			end := xld.WALStart + pglogrepl.LSN(len(xld.WALData))
-			if end > received {
-				received = end
+			if end > r.received {
+				r.received = end
 			}
-			flushed = received
+
+			txn, err := decoder.Decode(xld.WALData)
+			if err != nil {
+				return err
+			}
+			if txn != nil {
+				if err := r.send(ctx, out, *txn); err != nil {
+					return err
+				}
+			}
 		}
 	}
 }
 
-func sendStatus(conn *pgconn.PgConn, received pglogrepl.LSN, flushed pglogrepl.LSN) error {
-	err := pglogrepl.SendStandbyStatusUpdate(context.Background(), conn, pglogrepl.StandbyStatusUpdate{
-		WALWritePosition: received,
-		WALFlushPosition: flushed,
-		WALApplyPosition: flushed,
+func (r *Reader) send(ctx context.Context, out chan<- model.Txn, txn model.Txn) error {
+	ticker := time.NewTicker(statusInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case out <- txn:
+			return nil
+		case <-ticker.C:
+			if err := r.sendStatus(); err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (r *Reader) sendStatus() error {
+	durable := pglogrepl.LSN(r.durable.Load())
+	write := r.received
+	if durable == 0 {
+		write = 0
+	}
+	err := pglogrepl.SendStandbyStatusUpdate(context.Background(), r.conn, pglogrepl.StandbyStatusUpdate{
+		WALWritePosition: write,
+		WALFlushPosition: durable,
+		WALApplyPosition: durable,
 		ClientTime:       time.Now(),
 	})
 	if err != nil {
 		return fmt.Errorf("reader: status update: %w", err)
 	}
 	return nil
+}
+
+func (r *Reader) Close() {
+	if err := r.sendStatus(); err != nil {
+		log.Printf("final status update failed: %v", err)
+	} else {
+		log.Printf("acknowledged up to %s", pglogrepl.LSN(r.durable.Load()))
+	}
+	r.conn.Close(context.Background())
 }

@@ -151,13 +151,14 @@ script and screenshot it. Lighter, still demonstrates the concept.
 
 ## Scope guard — things to deliberately NOT do
 
-- ❌ Multiple tables / dynamic schema discovery
-- ❌ Schema evolution
-- ❌ Exactly-once / fancy LSN checkpointing to disk
+- ❌ Schema evolution (rewriting old files). Detecting a schema change and starting a new file is in.
+- ❌ DDL replication
 - ❌ A config file or CLI framework
 - ❌ MySQL/Mongo sources
 
-Keep it one table, one slot, one writer. Finished-and-simple beats
+Durable LSN checkpointing is **in scope**: it's what backs "zero lost or duplicate rows across forced restarts".
+
+Keep it one slot, one writer. Finished-and-simple beats
 ambitious-and-half-working.
 
 ---

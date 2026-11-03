@@ -1,35 +1,36 @@
-// Package config provides connection and runtime configuration.
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+	"time"
+)
 
-// Config holds all runtime settings for the CDC engine.
 type Config struct {
-	// Postgres connection string (must include replication=database).
-	// Example: "postgres://postgres:postgres@localhost:5432/cdc_demo?replication=database"
-	ConnString string
-
-	// Name of the publication to subscribe to.
-	Publication string
-
-	// Name of the replication slot to consume from.
-	SlotName string
-
-	// Directory to write Parquet output files.
-	OutputDir string
-
-	// Number of events to buffer before flushing to Parquet.
-	BatchSize int
+	ConnString      string
+	Publication     string
+	SlotName        string
+	OutputDir       string
+	BatchRows       int
+	FlushInterval   time.Duration
+	ChannelCapacity int
+	WriterDelay     time.Duration
+	Compression     string
+	Dedupe          bool
 }
 
-// FromEnv reads configuration from environment variables with sensible defaults.
 func FromEnv() Config {
 	return Config{
-		ConnString:  getEnv("PG_CONN", "postgres://postgres:postgres@localhost:5432/cdc_demo?replication=database"),
-		Publication: getEnv("PG_PUBLICATION", "my_pub"),
-		SlotName:    getEnv("PG_SLOT", "my_slot"),
-		OutputDir:   getEnv("OUTPUT_DIR", "./output"),
-		BatchSize:   100,
+		ConnString:      getEnv("PG_CONN", "postgres://postgres:postgres@localhost:5432/cdc_demo?replication=database"),
+		Publication:     getEnv("PG_PUBLICATION", "my_pub"),
+		SlotName:        getEnv("PG_SLOT", "my_slot"),
+		OutputDir:       getEnv("OUTPUT_DIR", "./output"),
+		BatchRows:       getInt("BATCH_ROWS", 50000),
+		FlushInterval:   getDuration("FLUSH_INTERVAL", 5*time.Second),
+		ChannelCapacity: getInt("CHANNEL_CAPACITY", 64),
+		WriterDelay:     getDuration("WRITER_DELAY", 0),
+		Compression:     getEnv("PARQUET_COMPRESSION", "snappy"),
+		Dedupe:          getEnv("DEDUPE", "true") != "false",
 	}
 }
 
@@ -38,4 +39,20 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getInt(key string, fallback int) int {
+	n, err := strconv.Atoi(os.Getenv(key))
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func getDuration(key string, fallback time.Duration) time.Duration {
+	d, err := time.ParseDuration(os.Getenv(key))
+	if err != nil {
+		return fallback
+	}
+	return d
 }

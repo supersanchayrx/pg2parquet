@@ -1,10 +1,27 @@
-// Package model defines the shared data types for the CDC pipeline.
 package model
 
-// ChangeEvent represents a single decoded CDC event from the WAL stream.
-type ChangeEvent struct {
-	Op     string                 // "insert" | "update" | "delete"
-	Table  string                 // source table name
-	Values map[string]interface{} // column name → value
-	LSN    uint64                 // log sequence number for acknowledgement
+import "time"
+
+type Column struct {
+	Name    string
+	TypeOID uint32
+}
+
+type Event struct {
+	Op        string
+	Schema    string
+	Table     string
+	Columns   []Column
+	Values    map[string]any
+	Unchanged []string
+	OldKey    map[string]any
+	Seq       int
+}
+
+type Txn struct {
+	Xid        uint32
+	CommitLSN  uint64
+	EndLSN     uint64
+	CommitTime time.Time
+	Events     []Event
 }
