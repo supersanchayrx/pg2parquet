@@ -1,13 +1,24 @@
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16.15
     container_name: cdc-pg
     ports:
       - "5432:5432"
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: cdc_demo
-    command: ["postgres", "-c", "wal_level=logical"]
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=4
+      - -c
+      - max_wal_senders=4
+      - -c
+      - max_slot_wal_keep_size=2GB
+      - -c
+      - wal_sender_timeout=60s
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./test/init.sql:/docker-entrypoint-initdb.d/01-init.sql

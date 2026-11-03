@@ -34,3 +34,6 @@ go.work.sum
 # Parquet output
 output/
 *.parquet
+
+# Build docs (local only)
+context-docs/
